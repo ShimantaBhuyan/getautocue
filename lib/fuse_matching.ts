@@ -1,6 +1,6 @@
 import Fuse from 'fuse.js';
 
-export interface FuseMatchResult {
+interface FuseMatchResult {
     index: number;
     score: number;
     spokenWordIndices: number[];
@@ -188,7 +188,7 @@ export class FuseTextMatcher {
 }
 
 // Backwards compatibility with existing fuzzy matching interface
-export const fuseMatch = {
+const fuseMatch = {
     token_sort_ratio: (str1: string, str2: string): number => {
         const fuse = new Fuse([str1], {
             includeScore: true,

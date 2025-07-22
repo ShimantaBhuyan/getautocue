@@ -5,7 +5,7 @@ import Fuse from 'fuse.js';
 const FUSE_THRESHOLD = 0.4;
 const SEARCH_WINDOW_SIZE = 8;
 
-export interface ScriptWord {
+interface ScriptWord {
     id: number;
     word: string;
     rawWord: string;
