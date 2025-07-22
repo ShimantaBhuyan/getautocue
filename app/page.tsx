@@ -26,6 +26,7 @@ import {
   MicOff,
 } from "lucide-react";
 import { FuseTextMatcher } from "@/lib/fuse_matching";
+import { useVoiceMode } from "@/hooks/use-voice-mode";
 
 type ScrollMode = "auto" | "voice" | "manual";
 
@@ -39,25 +40,11 @@ interface TeleprompterSettings {
   flipVertical: boolean;
 }
 
-interface VoiceState {
-  isListening: boolean;
-  isConnected: boolean;
-  currentTranscript: string;
-  spokenWords: Set<number>;
-  currentWordIndex: number;
-  nextWordIndex: number;
-  socket: WebSocket | null;
-  audioContext: AudioContext | null;
-  mediaStream: MediaStream | null;
-  scriptProcessor: ScriptProcessorNode | null;
-}
-
 export default function TeleprompterApp() {
   const [script, setScript] =
-    useState(`In the rapidly evolving landscape of voice-enabled applications and AI agents, the demand for fast, accurate, and reliable speech-to-text transcription is paramount. AssemblyAI stands at the forefront of this innovation with its cutting-edge "Streaming Speech-to-Text" product, powered by their advanced Universal-Streaming model. Designed to empower developers and businesses to create highly intuitive and responsive real-time voice experiences, this offering boasts a compelling suite of features that set it apart.
-At its core, AssemblyAI's Streaming Speech-to-Text delivers ultra-fast and ultra-accurate transcription. This isn't just a claim; the product boasts an impressive 300 ms word emission P50 latency, meaning that half of all words are transcribed and made available to downstream services within a mere 300 milliseconds. This near-instantaneous processing is crucial for maintaining natural conversation flow in applications like voice agents and contact centers, preventing awkward pauses and ensuring a seamless user experience. Furthermore, the Universal-Streaming model achieves a remarkable >91% word accuracy rate, consistently outperforming competitors like Deepgram Nova-3 in critical areas such as alphanumeric and proper noun recognition. This superior accuracy directly translates to fewer "silent transcription errors," ensuring that underlying LLM logic remains on track and precise.
-One of the standout features is Intelligent Turn Detection. Unlike traditional silence-based detection, AssemblyAI's approach combines acoustic and semantic features, leading to faster and more accurate end-of-turn detection. This intelligent endpointing allows conversations to flow more naturally, reducing interruptions and enabling voice agents to respond with precise timing. Developers gain granular control with configurable silence thresholds and confidence parameters, allowing them to fine-tune the experience to their specific use case.
-Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pricing. The Streaming Speech-to-Text solution offers unlimited concurrency, meaning businesses can handle thousands of simultaneous connections without worrying about hard caps, over-stream surcharges, or complex capacity planning. This robust scalability ensures consistent performance whether you're managing 5 or 50,000+ streams, all while maintaining a highly competitive pricing model starting at just $0.15/hr. This transparent, per-session duration pricing avoids the pitfalls of pre-purchased capacity, offering a cost-effective solution that scales with actual usage.`);
+    useState(`AssemblyAI stands at the forefront of this innovation with its cutting-edge "Streaming Speech-to-Text" product, powered by their advanced Universal-Streaming model. Designed to empower developers and businesses to create highly intuitive and responsive real-time voice experiences, this offering boasts a compelling suite of features that set it apart.
+At its core, AssemblyAI's Streaming Speech-to-Text delivers ultra-fast and ultra-accurate transcription. The near-instantaneous processing is crucial for maintaining natural conversation flow in applications like voice agents and contact centers, preventing awkward pauses and ensuring a seamless user experience. 
+One of the standout features is Intelligent Turn Detection. Unlike traditional silence-based detection, AssemblyAI's approach combines acoustic and semantic features, leading to faster and more accurate end-of-turn detection. This intelligent endpointing allows conversations to flow more naturally, reducing interruptions and enabling voice agents to respond with precise timing. Developers gain granular control with configurable silence thresholds and confidence parameters, allowing them to fine-tune the experience to their specific use case.`);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
@@ -70,7 +57,7 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
   >(null);
 
   const [settings, setSettings] = useState<TeleprompterSettings>({
-    scrollMode: "auto",
+    scrollMode: "voice",
     autoSpeed: 3,
     backgroundColor: "#000000",
     textColor: "#ffffff",
@@ -79,18 +66,15 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
     flipVertical: false,
   });
 
-  const [voiceState, setVoiceState] = useState<VoiceState>({
-    isListening: false,
-    isConnected: false,
-    currentTranscript: "",
-    spokenWords: new Set(),
-    currentWordIndex: -1,
-    nextWordIndex: -1,
-    socket: null,
-    audioContext: null,
-    mediaStream: null,
-    scriptProcessor: null,
-  });
+  // Use the voice mode hook
+  const {
+    scriptWords,
+    isListening,
+    isConnected,
+    startListening,
+    stopListening,
+    resetVoiceMode,
+  } = useVoiceMode(script);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -98,8 +82,6 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
   const keysPressed = useRef<Set<string>>(new Set());
   const scriptWordsRef = useRef<string[]>([]);
   const fuseMatcherRef = useRef<FuseTextMatcher | null>(null);
-  const lastTranscriptRef = useRef<string>("");
-  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const smoothScrollRef = useRef<{
     startPosition: number;
     targetPosition: number;
@@ -110,17 +92,11 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
 
   // Use refs to store current settings values to avoid closure issues
   const currentSettingsRef = useRef(settings);
-  const currentVoiceStateRef = useRef(voiceState);
 
   // Update the ref whenever settings change
   useEffect(() => {
     currentSettingsRef.current = settings;
   }, [settings]);
-
-  // Update the ref whenever voice state changes
-  useEffect(() => {
-    currentVoiceStateRef.current = voiceState;
-  }, [voiceState]);
 
   // Process script into words and create Fuse matcher when script changes
   useEffect(() => {
@@ -142,279 +118,46 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
     }
   }, []);
 
-  // Get AssemblyAI token
-  const getAssemblyAIToken = async () => {
-    try {
-      const response = await fetch("/api/assemblyai/token");
-      const data = await response.json();
+  // Update scroll position based on current word from voice mode
+  const updateScrollPosition = useCallback(
+    (wordIndex: number) => {
+      if (!scrollContainerRef.current || !scriptWords.length) return;
 
-      if (!data.token) {
-        throw new Error("Failed to get token");
+      const container = scrollContainerRef.current;
+      const progress = wordIndex / scriptWords.length;
+      const targetPosition =
+        progress * (container.scrollHeight - container.clientHeight);
+
+      // Only scroll if the target position is significantly different
+      const currentPosition = container.scrollTop;
+      const scrollThreshold = 50;
+
+      if (Math.abs(targetPosition - currentPosition) > scrollThreshold) {
+        // Smooth scroll to the new position
+        container.scrollTo({
+          top: targetPosition,
+          behavior: "smooth",
+        });
       }
+    },
+    [scriptWords]
+  );
 
-      return data.token;
-    } catch (error) {
-      console.error("Error getting AssemblyAI token:", error);
-      throw error;
-    }
-  };
-
-  // Start voice listening
-  const startVoiceListening = async () => {
-    try {
-      const token = await getAssemblyAIToken();
-
-      // Request microphone permission
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
-
-      // Create WebSocket connection
-      const wsUrl = `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&format_turns=true&token=${token}`;
-      const socket = new WebSocket(wsUrl);
-
-      // Create audio context
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const source = audioContext.createMediaStreamSource(mediaStream);
-      const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-
-      source.connect(scriptProcessor);
-      scriptProcessor.connect(audioContext.destination);
-
-      // Handle audio processing
-      scriptProcessor.onaudioprocess = (event) => {
-        if (socket.readyState === WebSocket.OPEN) {
-          const input = event.inputBuffer.getChannelData(0);
-          const buffer = new Int16Array(input.length);
-          for (let i = 0; i < input.length; i++) {
-            buffer[i] = Math.max(-1, Math.min(1, input[i])) * 0x7fff;
-          }
-          socket.send(buffer.buffer);
-        }
-      };
-
-      // Handle WebSocket events
-      socket.onopen = () => {
-        console.log("Voice WebSocket connected");
-        setVoiceState((prev) => ({ ...prev, isConnected: true }));
-      };
-
-      socket.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-
-        if (message.type === "Turn") {
-          handleTranscriptionUpdate(message.transcript, message.end_of_turn);
-        }
-      };
-
-      socket.onerror = (error) => {
-        console.error("Voice WebSocket error:", error);
-        stopVoiceListening();
-      };
-
-      socket.onclose = () => {
-        console.log("Voice WebSocket closed");
-        setVoiceState((prev) => ({ ...prev, isConnected: false }));
-      };
-
-      // Update voice state
-      setVoiceState((prev) => ({
-        ...prev,
-        isListening: true,
-        socket,
-        audioContext,
-        mediaStream,
-        scriptProcessor,
-      }));
-    } catch (error) {
-      console.error("Error starting voice listening:", error);
-    }
-  };
-
-  // Stop voice listening
-  const stopVoiceListening = () => {
-    // Clear any pending debounced updates
-    if (debounceTimeoutRef.current) {
-      clearTimeout(debounceTimeoutRef.current);
-      debounceTimeoutRef.current = null;
-    }
-
-    // Stop smooth scroll animation
-    if (smoothScrollRef.current) {
-      smoothScrollRef.current.isAnimating = false;
-      smoothScrollRef.current = null;
-    }
-
-    setVoiceState((prev) => {
-      // Cleanup audio resources
-      if (prev.scriptProcessor) {
-        prev.scriptProcessor.disconnect();
-      }
-      if (prev.audioContext) {
-        prev.audioContext.close();
-      }
-      if (prev.mediaStream) {
-        prev.mediaStream.getTracks().forEach((track) => track.stop());
-      }
-      if (prev.socket) {
-        prev.socket.send(JSON.stringify({ type: "Terminate" }));
-        prev.socket.close();
-      }
-
-      return {
-        ...prev,
-        isListening: false,
-        isConnected: false,
-        socket: null,
-        audioContext: null,
-        mediaStream: null,
-        scriptProcessor: null,
-      };
-    });
-  };
-
-  // Handle transcription updates
-  const handleTranscriptionUpdate = (
-    transcript: string,
-    endOfTurn: boolean
-  ) => {
-    setVoiceState((prev) => ({ ...prev, currentTranscript: transcript }));
-
-    // Only process if transcript has changed significantly
-    if (transcript.trim() && transcript !== lastTranscriptRef.current) {
-      lastTranscriptRef.current = transcript;
-
-      // Clear previous debounce timeout
-      if (debounceTimeoutRef.current) {
-        clearTimeout(debounceTimeoutRef.current);
-      }
-
-      // Debounce the matching to prevent too frequent updates
-      debounceTimeoutRef.current = setTimeout(() => {
-        const matchResult = findBestMatch(transcript);
-        if (matchResult) {
-          updateScrollPosition(matchResult.index);
-          setVoiceState((prev) => ({
-            ...prev,
-            currentWordIndex: matchResult.index,
-            nextWordIndex: matchResult.nextWordIndex,
-            spokenWords: new Set(matchResult.spokenWordIndices),
-          }));
-        }
-      }, 150); // 150ms debounce delay
-    }
-
-    // Handle pause/resume based on end of turn
-    if (endOfTurn) {
-      setIsPlaying(false);
-      // Clear any pending debounced updates
-      if (debounceTimeoutRef.current) {
-        clearTimeout(debounceTimeoutRef.current);
-        debounceTimeoutRef.current = null;
-      }
-    } else if (!isPlaying && settings.scrollMode === "voice") {
-      setIsPlaying(true);
-    }
-  }; // Find best match using Fuse.js-based fuzzy matching
-  const findBestMatch = (transcript: string) => {
-    if (!fuseMatcherRef.current) return null;
-
-    const currentPosition = voiceState.currentWordIndex;
-    const matchResult = fuseMatcherRef.current.findBestMatch(
-      transcript,
-      currentPosition
-    );
-
-    return matchResult;
-  };
-
-  // Update scroll position based on matched text with smooth animation
-  const updateScrollPosition = (wordIndex: number) => {
-    if (!scrollContainerRef.current) return;
-
-    const container = scrollContainerRef.current;
-    const words = scriptWordsRef.current;
-
-    // Calculate approximate position based on word index
-    const progress = wordIndex / words.length;
-    const targetPosition =
-      progress * (container.scrollHeight - container.clientHeight);
-
-    // Only scroll if the target position is significantly different from current position
-    const currentPosition = container.scrollTop;
-    const scrollThreshold = 30; // Lower threshold for smoother tracking
-
-    if (Math.abs(targetPosition - currentPosition) > scrollThreshold) {
-      // Initialize smooth scroll animation
-      smoothScrollRef.current = {
-        startPosition: currentPosition,
-        targetPosition,
-        startTime: Date.now(),
-        duration: 800, // 800ms smooth scroll
-        isAnimating: true,
-      };
-
-      // Start smooth scroll animation
-      animateSmoothScroll();
-    }
-  };
-
-  // Smooth scroll animation function
-  const animateSmoothScroll = () => {
-    if (!smoothScrollRef.current || !scrollContainerRef.current) return;
-
-    const { startPosition, targetPosition, startTime, duration } =
-      smoothScrollRef.current;
-    const elapsed = Date.now() - startTime;
-    const progress = Math.min(elapsed / duration, 1);
-
-    // Easing function for smooth animation
-    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-    const easedProgress = easeOutCubic(progress);
-
-    const currentPosition =
-      startPosition + (targetPosition - startPosition) * easedProgress;
-    scrollContainerRef.current.scrollTop = currentPosition;
-
-    if (progress < 1) {
-      requestAnimationFrame(animateSmoothScroll);
-    } else {
-      smoothScrollRef.current.isAnimating = false;
-    }
-  }; // Cleanup voice resources on component unmount
+  // Effect to update scroll position when voice mode detects current word
   useEffect(() => {
-    return () => {
-      // Clear any pending debounced updates
-      if (debounceTimeoutRef.current) {
-        clearTimeout(debounceTimeoutRef.current);
+    if (settings.scrollMode === "voice" && scriptWords.length > 0) {
+      // Find the current word index
+      const currentWordIndex = scriptWords.findIndex((word) => word.isCurrent);
+      if (currentWordIndex >= 0) {
+        updateScrollPosition(currentWordIndex);
       }
-
-      // Stop smooth scroll animation
-      if (smoothScrollRef.current) {
-        smoothScrollRef.current.isAnimating = false;
-      }
-
-      if (voiceState.socket) {
-        voiceState.socket.close();
-      }
-      if (voiceState.scriptProcessor) {
-        voiceState.scriptProcessor.disconnect();
-      }
-      if (voiceState.audioContext) {
-        voiceState.audioContext.close();
-      }
-      if (voiceState.mediaStream) {
-        voiceState.mediaStream.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, []);
-
-  // Cleanup voice resources when switching scroll modes
-  useEffect(() => {
-    if (settings.scrollMode !== "voice" && voiceState.isListening) {
-      stopVoiceListening();
     }
-  }, [settings.scrollMode]);
+  }, [scriptWords, settings.scrollMode, updateScrollPosition]); // Cleanup voice resources when switching scroll modes
+  useEffect(() => {
+    if (settings.scrollMode !== "voice" && isListening) {
+      stopListening();
+    }
+  }, [settings.scrollMode, isListening, stopListening]);
   useEffect(() => {
     if (isPlaying && settings.scrollMode === "auto") {
       const animate = (currentTime: number) => {
@@ -557,7 +300,7 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
   const handleStart = async () => {
     if (!isAtEnd) {
       if (settings.scrollMode === "voice") {
-        await startVoiceListening();
+        await startListening();
       }
       setIsPlaying(true);
     }
@@ -566,14 +309,14 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
   const handlePause = () => {
     setIsPlaying(false);
     if (settings.scrollMode === "voice") {
-      stopVoiceListening();
+      stopListening();
     }
   };
 
   const handleStop = () => {
     setIsPlaying(false);
     if (settings.scrollMode === "voice") {
-      stopVoiceListening();
+      stopListening();
     }
     if (scrollContainerRef.current) {
       // Reset to appropriate position based on current flip state
@@ -587,16 +330,7 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
       }
     }
     setIsAtEnd(false);
-    setVoiceState((prev) => ({
-      ...prev,
-      currentTranscript: "",
-      spokenWords: new Set(),
-      currentWordIndex: -1,
-      nextWordIndex: -1,
-    }));
-
-    // Reset transcript reference
-    lastTranscriptRef.current = "";
+    resetVoiceMode();
   };
 
   const handleRestart = () => {
@@ -644,17 +378,16 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
       return script;
     }
 
-    const words = scriptWordsRef.current;
-    if (!words.length) return script;
+    if (!scriptWords.length) return script;
 
-    const highlightedWords = words.map((word, index) => {
-      const isSpoken = voiceState.spokenWords.has(index);
-      const isNextWord = index === voiceState.nextWordIndex;
+    const highlightedWords = scriptWords.map((wordObj, index) => {
+      const isSpoken = wordObj.isSpoken;
+      const isCurrent = wordObj.isCurrent;
 
       // Calculate colors based on text color
       const textColor = settings.textColor;
       const darkerTextColor = adjustColorBrightness(textColor, -0.4); // Darker for spoken words
-      const highlightColor = "#FFD700"; // Gold color for next word
+      const highlightColor = "#FFD700"; // Gold color for current word
 
       return (
         <span
@@ -662,14 +395,13 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
           style={{
             color: isSpoken
               ? darkerTextColor
-              : isNextWord
+              : isCurrent
               ? highlightColor
               : textColor,
-            // fontWeight: isNextWord ? "bold" : "normal",
-            transition: "color 0.2s ease-in-out, font-weight 0.3s ease-in-out",
+            transition: "color 0.2s ease-in-out",
           }}
         >
-          {word}
+          {wordObj.word}
         </span>
       );
     });
@@ -1082,21 +814,13 @@ Beyond speed and accuracy, AssemblyAI emphasizes scalability and transparent pri
                   <div className="flex items-center gap-2">
                     <div
                       className={`w-2 h-2 rounded-full ${
-                        voiceState.isConnected ? "bg-green-400" : "bg-red-400"
-                      } ${voiceState.isListening ? "animate-pulse" : ""}`}
+                        isConnected ? "bg-green-400" : "bg-red-400"
+                      } ${isListening ? "animate-pulse" : ""}`}
                     />
                     <span className="text-white text-sm">
-                      {voiceState.isConnected ? "Connected" : "Disconnected"}
+                      {isConnected ? "Connected" : "Disconnected"}
                     </span>
                   </div>
-                  {voiceState.currentTranscript && (
-                    <div className="flex items-center gap-2 ml-2">
-                      <span className="text-white/70 text-xs">Heard:</span>
-                      <span className="text-white/70 text-xs max-w-40 truncate">
-                        "{voiceState.currentTranscript}"
-                      </span>
-                    </div>
-                  )}
                 </div>
               )}
 
