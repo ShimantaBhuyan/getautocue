@@ -17,10 +17,13 @@ export const useVoiceMode = (initialScript: string) => {
     const [scriptWords, setScriptWords] = useState<ScriptWord[]>([]);
     const [isConnected, setIsConnected] = useState(false);
     const [isListening, setIsListening] = useState(false);
+    const [isShowingCountdown, setIsShowingCountdown] = useState(false);
+    const [countdownValue, setCountdownValue] = useState(3);
 
     const socketRef = useRef<WebSocket | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const lastMatchedWordIndex = useRef(-1);
+    const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
     // Pre-process the script whenever it changes
     useEffect(() => {
@@ -34,7 +37,6 @@ export const useVoiceMode = (initialScript: string) => {
                 isSpoken: false,
                 isCurrent: false,
             }));
-        console.log("Processed script:", processedScript);
         setScriptWords(processedScript);
         lastMatchedWordIndex.current = -1; // Reset progress
     }, [initialScript]);
@@ -58,7 +60,6 @@ export const useVoiceMode = (initialScript: string) => {
                 threshold: FUSE_THRESHOLD,
             });
             const results = fuse.search(transcribedWord);
-            console.log({ results })
 
             if (results.length > 0) {
                 const bestMatch = results[0];
@@ -101,7 +102,6 @@ export const useVoiceMode = (initialScript: string) => {
             threshold: FUSE_THRESHOLD + 0.1, // Be a bit more lenient for partials
         });
         const results = fuse.search(lastPartialWord);
-        console.log("FULL SEARCH RESULTS:", results);
 
         if (results.length > 0) {
             const bestMatch = results[0];
@@ -116,10 +116,49 @@ export const useVoiceMode = (initialScript: string) => {
         }
     }, [scriptWords]);
 
+    const startCountdown = () => {
+        return new Promise<void>((resolve) => {
+            setIsShowingCountdown(true);
+            setCountdownValue(3);
+
+            let count = 3;
+            countdownIntervalRef.current = setInterval(() => {
+                count--;
+                if (count > 0) {
+                    setCountdownValue(count);
+                } else {
+                    if (countdownIntervalRef.current) {
+                        clearInterval(countdownIntervalRef.current);
+                        countdownIntervalRef.current = null;
+                    }
+                    setIsShowingCountdown(false);
+                    resolve();
+                }
+            }, 1000);
+        });
+    };
+
     const startListening = async () => {
         if (isListening) return;
 
         try {
+            // Get user media first to check for permissions
+            const permissionStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            });
+
+            // Stop the stream temporarily - we'll get a fresh one after countdown
+            permissionStream.getTracks().forEach(track => track.stop());
+
+            // Show countdown after getting permission
+            await startCountdown();
+
+            // Now proceed with the actual connection setup
             const response = await fetch('/api/assemblyai/token');
             const data = await response.json();
             if (!data.token) throw new Error('Failed to get AssemblyAI token');
@@ -129,12 +168,10 @@ export const useVoiceMode = (initialScript: string) => {
 
             socketRef.current.onopen = () => {
                 setIsConnected(true);
-                console.log('Voice WebSocket connected');
             };
 
             socketRef.current.onmessage = (event) => {
                 const message = JSON.parse(event.data);
-                console.log('WebSocket message:', message); // Debug log
 
                 // Handle different message types from AssemblyAI v3 API
                 if (message.message_type === 'PartialTranscript') {
@@ -152,13 +189,11 @@ export const useVoiceMode = (initialScript: string) => {
             };
 
             socketRef.current.onerror = (error) => {
-                console.error('Voice WebSocket error:', error);
                 stopListening();
             };
 
             socketRef.current.onclose = (event) => {
                 setIsConnected(false);
-                console.log('Voice WebSocket closed', event.code, event.reason);
             };
 
             // Set up audio processing for PCM data
@@ -205,12 +240,25 @@ export const useVoiceMode = (initialScript: string) => {
             setIsListening(true);
 
         } catch (error) {
+            // Clean up countdown state on error
+            setIsShowingCountdown(false);
+            if (countdownIntervalRef.current) {
+                clearInterval(countdownIntervalRef.current);
+                countdownIntervalRef.current = null;
+            }
             console.error('Error starting voice listening:', error);
         }
     };
 
     const stopListening = () => {
-        if (!isListening) return;
+        if (!isListening && !isShowingCountdown) return;
+
+        // Cancel countdown if it's running
+        if (countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
+        }
+        setIsShowingCountdown(false);
 
         // Cleanup audio resources
         if (mediaRecorderRef.current) {
@@ -246,6 +294,7 @@ export const useVoiceMode = (initialScript: string) => {
         setScriptWords(currentWords =>
             currentWords.map(word => ({ ...word, isSpoken: false, isCurrent: false }))
         );
+        setIsShowingCountdown(false);
         lastMatchedWordIndex.current = -1;
     };
 
@@ -260,6 +309,8 @@ export const useVoiceMode = (initialScript: string) => {
         scriptWords,
         isListening,
         isConnected,
+        isShowingCountdown,
+        countdownValue,
         startListening,
         stopListening,
         resetVoiceMode,

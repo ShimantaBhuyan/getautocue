@@ -49,7 +49,6 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
   const [isPlaying, setIsPlaying] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showPanel, setShowPanel] = useState(true);
   const [mouseAtBottom, setMouseAtBottom] = useState(false);
   const [isAtEnd, setIsAtEnd] = useState(false);
   const [manualScrollDirection, setManualScrollDirection] = useState<
@@ -71,6 +70,8 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
     scriptWords,
     isListening,
     isConnected,
+    isShowingCountdown,
+    countdownValue,
     startListening,
     stopListening,
     resetVoiceMode,
@@ -82,13 +83,6 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
   const keysPressed = useRef<Set<string>>(new Set());
   const scriptWordsRef = useRef<string[]>([]);
   const fuseMatcherRef = useRef<FuseTextMatcher | null>(null);
-  const smoothScrollRef = useRef<{
-    startPosition: number;
-    targetPosition: number;
-    startTime: number;
-    duration: number;
-    isAnimating: boolean;
-  } | null>(null);
 
   // Use refs to store current settings values to avoid closure issues
   const currentSettingsRef = useRef(settings);
@@ -694,6 +688,20 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
         </div>
       )}
 
+      {/* Countdown Overlay */}
+      {isShowingCountdown && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-8xl font-bold text-white mb-4 animate-pulse">
+              {countdownValue}
+            </div>
+            <div className="text-xl text-gray-300">
+              Get ready to start speaking...
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Teleprompter Display */}
       <div
         ref={scrollContainerRef}
@@ -726,7 +734,7 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
             <div className="flex items-center gap-3">
               <Button
                 onClick={isPlaying ? handlePause : handleStart}
-                disabled={isAtEnd && !isPlaying}
+                disabled={isAtEnd && !isPlaying || isShowingCountdown}
                 className={`${
                   isPlaying
                     ? "bg-red-500 hover:bg-red-600 text-white"
@@ -738,6 +746,11 @@ One of the standout features is Intelligent Turn Detection. Unlike traditional s
                     <>
                       <MicOff className="w-4 h-4 mr-2" />
                       Stop Listening
+                    </>
+                  ) : isShowingCountdown ? (
+                    <>
+                      <Mic className="w-4 h-4 mr-2 animate-pulse" />
+                      Starting... {countdownValue}
                     </>
                   ) : (
                     <>
